@@ -10,26 +10,31 @@ log_message() {
 }
 
 # Çalışan Gensyn süreçlerini kontrol et ve durdur
-log_message "Çalışan Gensyn süreçlerini kontrol ediliyor..."
-if pgrep -f "gensyn-testnet/gensyn.sh" > /dev/null; then
-    log_message "Çalışan Gensyn süreci bulundu. Durduruluyor..."
-    pkill -SIGINT -f "gensyn-testnet/gensyn.sh"
-    sleep 10
+stop_gensyn() {
+    log_message "Çalışan Gensyn süreçlerini kontrol ediliyor..."
     if pgrep -f "gensyn-testnet/gensyn.sh" > /dev/null; then
-        log_message "Süreç hala çalışıyor. SIGINT tekrar gönderiliyor..."
+        log_message "Çalışan Gensyn süreci bulundu. Durduruluyor..."
         pkill -SIGINT -f "gensyn-testnet/gensyn.sh"
-        sleep 5
-        pkill -SIGINT -f "gensyn-testnet/gensyn.sh"
-        sleep 5
-        # Hala çalışıyorsa zorla sonlandır
+        sleep 10
         if pgrep -f "gensyn-testnet/gensyn.sh" > /dev/null; then
-            log_message "Süreç zorla sonlandırılıyor..."
-            pkill -9 -f "gensyn-testnet/gensyn.sh"
+            log_message "Süreç hala çalışıyor. SIGINT tekrar gönderiliyor..."
+            pkill -SIGINT -f "gensyn-testnet/gensyn.sh"
+            sleep 5
+            pkill -SIGINT -f "gensyn-testnet/gensyn.sh"
+            sleep 5
+            # Hala çalışıyorsa zorla sonlandır
+            if pgrep -f "gensyn-testnet/gensyn.sh" > /dev/null; then
+                log_message "Süreç zorla sonlandırılıyor..."
+                pkill -9 -f "gensyn-testnet/gensyn.sh"
+            fi
         fi
+        log_message "Çalışan süreçler durduruldu."
+        sleep 10
     fi
-    log_message "Çalışan süreçler durduruldu."
-    sleep 10
-fi
+}
+
+# Başlangıçta çalışan süreçleri durdur
+stop_gensyn
 
 # Fonksiyon: Sorular için yanıtları otomatik gönder
 run_with_answers() {
@@ -112,7 +117,7 @@ check_for_errors() {
 
 # Ana döngü
 while true; do
-    log_message "Gensyn testnet yeniden başlatılıyor..."
+    log_message "Gensyn testnet başlatılıyor..."
     
     # Programı başlat ve arka planda çalıştır
     run_with_answers &
@@ -120,6 +125,7 @@ while true; do
     
     # CPU düşük kullanım sayacı
     low_cpu_count=0
+    restart_needed=false
     
     # Program çalıştığı sürece izle
     while kill -0 $GENSYN_PID 2>/dev/null; do
@@ -139,49 +145,52 @@ while true; do
             # 3 saat boyunca düşük CPU kullanımı
             if [ $low_cpu_count -ge 3 ]; then
                 log_message "CPU kullanımı 3 saat boyunca %50'nin altında kaldı. Yeniden başlatılıyor..."
-                log_message "Ctrl+C gönderiliyor..."
-                kill -SIGINT $GENSYN_PID
-                sleep 10
-                # İkinci kez Ctrl+C
-                if kill -0 $GENSYN_PID 2>/dev/null; then
-                    log_message "İkinci Ctrl+C gönderiliyor..."
-                    kill -SIGINT $GENSYN_PID
-                    sleep 5
-                    # Üçüncü kez Ctrl+C
-                    kill -SIGINT $GENSYN_PID
-                    sleep 5
-                    # Eğer hala çalışıyorsa zorla sonlandır
-                    if kill -0 $GENSYN_PID 2>/dev/null; then
-                        log_message "Hala çalışıyor. Zorla sonlandırılıyor..."
-                        kill -9 $GENSYN_PID
-                    fi
-                fi
-                break
+                restart_needed=true
+                break  # İç döngüden çık, yeniden başlatma için
             fi
         else
+            # Normal CPU kullanımında sayacı sıfırla
             low_cpu_count=0
         fi
         
         # Hata kontrolü
         if check_for_errors; then
             log_message "Hata tespit edildi, programı yeniden başlatma..."
-            log_message "Ctrl+C gönderiliyor..."
-            # 2-3 kez Ctrl+C gönder
+            restart_needed=true
+            break  # İç döngüden çık, yeniden başlatma için
+        fi
+    done
+    
+    # Eğer restart_needed = true ise veya süreç kendiliğinden sonlandıysa
+    log_message "Süreç sonlandırılıyor..."
+    
+    # Süreç hala çalışıyorsa, düzgünce sonlandırmaya çalış
+    if kill -0 $GENSYN_PID 2>/dev/null; then
+        log_message "Ctrl+C gönderiliyor..."
+        kill -SIGINT $GENSYN_PID
+        sleep 10
+        
+        # İkinci kez Ctrl+C
+        if kill -0 $GENSYN_PID 2>/dev/null; then
+            log_message "İkinci Ctrl+C gönderiliyor..."
             kill -SIGINT $GENSYN_PID
             sleep 5
+            
+            # Üçüncü kez Ctrl+C
             kill -SIGINT $GENSYN_PID
             sleep 5
-            kill -SIGINT $GENSYN_PID
-            sleep 5
+            
             # Eğer hala çalışıyorsa zorla sonlandır
             if kill -0 $GENSYN_PID 2>/dev/null; then
                 log_message "Hala çalışıyor. Zorla sonlandırılıyor..."
                 kill -9 $GENSYN_PID
             fi
-            break
         fi
-    done
+    fi
     
-    log_message "Program sonlandı, 30 saniye bekleniyor..."
+    # Diğer süreçleri de temizle
+    stop_gensyn
+    
+    log_message "Yeniden başlatmadan önce 30 saniye bekleniyor..."
     sleep 30
 done
