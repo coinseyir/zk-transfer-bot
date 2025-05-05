@@ -6,19 +6,25 @@ set cpu_threshold 50
 set log_file "/tmp/gensyn_auto.log"
 
 # Log dosyasını oluştur veya temizle
-exec echo "=== Gensyn Auto Script Started: [clock format [clock seconds]] ===" > $log_file
+set fh [open $log_file "w"]
+puts $fh "=== Gensyn Auto Script Started: [clock format [clock seconds]] ==="
+close $fh
 
 # Timestamp fonksiyonu
 proc timestamp {} {
     return [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
 }
 
-# Log fonksiyonu - hem ekrana hem dosyaya yazar
+# Log fonksiyonu - hem ekrana hem dosyaya yazar (düzeltilmiş)
 proc log_msg {msg} {
     global log_file
     set timestamp [timestamp]
     puts "\[$timestamp\] $msg"
-    exec sh -c "echo '\[$timestamp\] $msg' >> $log_file"
+    
+    # Doğrudan TCL ile dosyaya yaz, shell kullanma
+    set fh [open $log_file "a"]
+    puts $fh "\[$timestamp\] $msg"
+    close $fh
 }
 
 # Tüm yanıtları ver - ayrı fonksiyon olarak
@@ -134,7 +140,7 @@ proc start_cpu_monitor {} {
     puts $fh "    low_cpu_count=\$((low_cpu_count + 1))"
     puts $fh "    echo '\$(date): Düşük CPU sayacı: \$low_cpu_count/\$max_low_cpu' >> $log_file"
     puts $fh "    if \[ \"\$low_cpu_count\" -ge \"\$max_low_cpu\" \]; then"
-    puts $fh "      echo '\$(date): CPU uzun süre düşük! Uygulamayı durdurun (2-3 kez Ctrl+C) ve tekrar başlatın' >> $log_file"
+    puts $fh "      echo '\$(date): CPU uzun süre düşük! Yeniden başlatılıyor' >> $log_file"
     puts $fh "      # Burada doğrudan kill etmiyoruz, expect script'e bilgi veriyoruz"
     puts $fh "      touch /tmp/gensyn_restart_needed"
     puts $fh "      low_cpu_count=0"
