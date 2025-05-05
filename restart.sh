@@ -1,241 +1,204 @@
-#!/bin/bash
+#!/usr/bin/expect -f
 
-# Benzersiz tanımlayıcı oluştur - çakışmaları önlemek için
-UNIQUE_ID="gensyn_auto_$(date +%s)"
-OUTPUT_FILE="/tmp/${UNIQUE_ID}_output.txt"
-PIPE="/tmp/${UNIQUE_ID}_pipe"
-LOG_FILE="/tmp/${UNIQUE_ID}_log.txt"
+# Genel değişkenler
+set timeout -1
+set cpu_threshold 50
+set log_file "/tmp/gensyn_auto.log"
 
-# Log fonksiyonu
-log() {
-    echo "$(date): $1" | tee -a $LOG_FILE
+# Log dosyasını oluştur veya temizle
+exec echo "=== Gensyn Auto Script Started: [clock format [clock seconds]] ===" > $log_file
+
+# Timestamp fonksiyonu
+proc timestamp {} {
+    return [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
 }
 
-# Mevcut Gensyn işlemini kontrol et
-check_existing_gensyn() {
-    if pgrep -f "gensyn-testnet/gensyn.sh" > /dev/null; then
-        log "⚠️ Gensyn zaten çalışıyor. Bu scriptin çalışmakta olan uygulamayı duraklatmadan sadece izleme yapacağını unutmayın."
-        return 0
-    else
-        return 1
-    fi
+# Log fonksiyonu - hem ekrana hem dosyaya yazar
+proc log_msg {msg} {
+    global log_file
+    set timestamp [timestamp]
+    puts "\[$timestamp\] $msg"
+    exec sh -c "echo '\[$timestamp\] $msg' >> $log_file"
 }
 
-# Function to run the main command and handle responses
-run_gensyn() {
-    # Check if already running
-    if check_existing_gensyn; then
-        log "Mevcut Gensyn işlemini kullanıyorum"
-        GENSYN_PID=$(pgrep -f "gensyn-testnet/gensyn.sh")
-        return
-    fi
+# Tüm yanıtları ver - ayrı fonksiyon olarak
+proc handle_prompts {} {
+    # Bu fonksiyon tek başına tüm sorulara yanıt verir
+    expect {
+        "Enter your choice (1 or 2):" {
+            send "1\r"
+            log_msg "swarm.pem sorusuna yanıt verildi: 1"
+            exp_continue
+        }
+        "Please select a swarm to join:" {
+            # Biraz bekleyerek ">" prompt'unun gelmesini sağla
+            sleep 1
+            send "A\r"
+            log_msg "Swarm seçim sorusuna yanıt verildi: A"
+            exp_continue
+        }
+        ">" {
+            # Hangi soru olduğunu anlamak için önceki çıktıya bak
+            if {[string match "*swarm to join*" $expect_out(buffer)]} {
+                send "A\r"
+                log_msg "Swarm seçim sorusuna yanıt verildi: A"
+            } elseif {[string match "*parameters*" $expect_out(buffer)]} {
+                send "0.5\r"
+                log_msg "Parametre sorusuna yanıt verildi: 0.5"
+            }
+            exp_continue
+        }
+        "How many parameters" {
+            # Biraz bekleyerek ">" prompt'unun gelmesini sağla
+            sleep 1
+            send "0.5\r"
+            log_msg "Parametre sorusuna yanıt verildi: 0.5"
+            exp_continue
+        }
+        "Would you like to push models you train in the RL swarm to the Hugging Face Hub?" {
+            send "N\r"
+            log_msg "Hugging Face sorusuna yanıt verildi: N"
+            exp_continue
+        }
+        "\\\[y/N\\\]" {
+            send "N\r"
+            log_msg "Hugging Face sorusuna yanıt verildi: N"
+            exp_continue
+        }
+        "Connected to Gensyn Testnet" {
+            log_msg "✅ Gensyn Testnet'e başarıyla bağlanıldı!"
+            exp_continue
+        }
+        -re {failed to connect to bootstrap peers|Daemon failed to start|P2PDaemonError} {
+            log_msg "❌ Bağlantı hatası tespit edildi! Yeniden başlatılıyor..."
+            restart_app
+            exp_continue
+        }
+        eof {
+            log_msg "Program sonlandı. Yeniden başlatılıyor..."
+            restart_app
+            exp_continue
+        }
+        timeout {
+            log_msg "Beklenmeyen bir timeout oluştu. İzleme devam ediyor..."
+            exp_continue
+        }
+    }
+}
 
-    # Setup output and input mechanisms
-    touch $OUTPUT_FILE
-    rm -f $PIPE
-    mkfifo $PIPE
+# Uygulamayı yeniden başlat fonksiyonu
+proc restart_app {} {
+    global spawn_id
+    log_msg "Gensyn durduruluyor ve yeniden başlatılıyor..."
     
-    log "Gensyn başlatılıyor..."
-    log "Çıktılar burada: $OUTPUT_FILE"
-    log "Giriş pipe: $PIPE"
-
-    # Scripti başlat
-    cd $HOME && rm -rf gensyn-testnet && git clone https://github.com/zunxbt/gensyn-testnet.git && \
-    chmod +x gensyn-testnet/gensyn.sh && ./gensyn-testnet/gensyn.sh < $PIPE > $OUTPUT_FILE 2>&1 &
-    
-    # PID'i kaydet
-    GENSYN_PID=$!
-    log "Gensyn PID: $GENSYN_PID"
-    
-    # Wait for the first prompt about swarm.pem
-    log "swarm.pem sorusu bekleniyor..."
-    while ! grep -q "You already have an existing swarm.pem file" $OUTPUT_FILE; do
+    # Ctrl+C sinyali gönder (2-3 kez)
+    for {set i 0} {$i < 3} {incr i} {
+        send "\003"
         sleep 2
-        # İşlemin yaşayıp yaşamadığını kontrol et
-        if ! ps -p $GENSYN_PID > /dev/null; then
-            log "İşlem swarm.pem sorusu gelmeden önce kapandı"
-            return 1
-        fi
-    done
-    log "swarm.pem sorusuna yanıt veriliyor: 1"
-    echo "1" > $PIPE  # Mevcut swarm.pem kullan
+    }
     
-    # Swarm seçim sorusu için bekle
-    log "Swarm seçim sorusu bekleniyor..."
-    while ! grep -q "Please select a swarm to join" $OUTPUT_FILE; do
-        sleep 2
-        if ! ps -p $GENSYN_PID > /dev/null; then
-            log "İşlem swarm seçim sorusu gelmeden önce kapandı"
-            return 1
-        fi
-    done
-    log "Swarm seçim sorusuna yanıt veriliyor: A"
-    echo "A" > $PIPE  # Math swarm'ı seç
+    # Mevcut işlemi sonlandır
+    catch {close}
+    catch {wait}
     
-    # Parametre sorusu için bekle
-    log "Parametre sorusu bekleniyor..."
-    while ! grep -q "How many parameters" $OUTPUT_FILE; do
-        sleep 2
-        if ! ps -p $GENSYN_PID > /dev/null; then
-            log "İşlem parametre sorusu gelmeden önce kapandı"
-            return 1
-        fi
-    done
-    log "Parametre sorusuna yanıt veriliyor: 0.5"
-    echo "0.5" > $PIPE  # 0.5 milyar parametre seç
+    # Yeni işlemi başlat
+    log_msg "Yeni Gensyn işlemi başlatılıyor..."
+    spawn bash -c "cd \$HOME && rm -rf gensyn-testnet && git clone https://github.com/zunxbt/gensyn-testnet.git && chmod +x gensyn-testnet/gensyn.sh && ./gensyn-testnet/gensyn.sh"
     
-    # Hugging Face sorusu için bekle
-    log "Hugging Face sorusu bekleniyor..."
-    while ! grep -q "Would you like to push models you train in the RL swarm to the Hugging Face Hub" $OUTPUT_FILE; do
-        sleep 2
-        if ! ps -p $GENSYN_PID > /dev/null; then
-            log "İşlem Hugging Face sorusu gelmeden önce kapandı"
-            return 1
-        fi
-    done
-    log "Hugging Face sorusuna yanıt veriliyor: N"
-    echo "N" > $PIPE  # Hugging Face'e yükleme yapma
-    
-    log "Tüm sorular yanıtlandı. Şimdi izleniyor..."
-    
-    # Pipe'ı temizle ama çıktı dosyasını izleme için tut
-    rm -f $PIPE
+    # Tüm yanıtları tekrar ver
+    handle_prompts
 }
 
-# Hata paternlerini kontrol et
-check_for_errors() {
-    if grep -q "failed to connect to bootstrap peers" "$OUTPUT_FILE" || \
-       grep -q "Daemon failed to start" "$OUTPUT_FILE" || \
-       grep -q "hivemind.p2p.p2p_daemon_bindings.utils.P2PDaemonError" "$OUTPUT_FILE"; then
-        return 0  # Hata bulundu
-    else
-        return 1  # Hata yok
-    fi
+# CPU izleme - ayrı bir process olarak çalışacak
+proc start_cpu_monitor {} {
+    global cpu_threshold log_file
+    
+    # CPU izleme komutunu bash script olarak oluştur
+    set cpu_script "/tmp/gensyn_cpu_monitor.sh"
+    set fh [open $cpu_script "w"]
+    
+    puts $fh "#!/bin/bash"
+    puts $fh "echo 'CPU izleme başlatıldı: \$(date)' >> $log_file"
+    puts $fh "low_cpu_count=0"
+    puts $fh "max_low_cpu=60  # 1 saat (her dakika kontrol)"
+    puts $fh "while true; do"
+    puts $fh "  gensyn_pid=\$(pgrep -f 'gensyn-testnet/gensyn.sh')"
+    puts $fh "  if \[ -z \"\$gensyn_pid\" \]; then"
+    puts $fh "    echo '\$(date): CPU izleme - Gensyn işlemi bulunamadı' >> $log_file"
+    puts $fh "    sleep 30"
+    puts $fh "    continue"
+    puts $fh "  fi"
+    puts $fh "  cpu_usage=\$(ps -p \$gensyn_pid -o %cpu= | awk '{print int(\$1)}')"
+    puts $fh "  echo '\$(date): CPU kullanımı: \${cpu_usage}%' >> $log_file"
+    puts $fh "  if \[ \"\$cpu_usage\" -lt \"$cpu_threshold\" \]; then"
+    puts $fh "    low_cpu_count=\$((low_cpu_count + 1))"
+    puts $fh "    echo '\$(date): Düşük CPU sayacı: \$low_cpu_count/\$max_low_cpu' >> $log_file"
+    puts $fh "    if \[ \"\$low_cpu_count\" -ge \"\$max_low_cpu\" \]; then"
+    puts $fh "      echo '\$(date): CPU uzun süre düşük! Uygulamayı durdurun (2-3 kez Ctrl+C) ve tekrar başlatın' >> $log_file"
+    puts $fh "      # Burada doğrudan kill etmiyoruz, expect script'e bilgi veriyoruz"
+    puts $fh "      touch /tmp/gensyn_restart_needed"
+    puts $fh "      low_cpu_count=0"
+    puts $fh "    fi"
+    puts $fh "  else"
+    puts $fh "    low_cpu_count=0"
+    puts $fh "  fi"
+    puts $fh "  sleep 60"
+    puts $fh "done"
+    
+    close $fh
+    exec chmod +x $cpu_script
+    
+    # CPU izleme scriptini başlat
+    log_msg "CPU izleme başlatılıyor (eşik: %$cpu_threshold, süre: 1 saat)"
+    exec $cpu_script &
 }
 
-# İşlemi yeniden başlat
-restart_process() {
-    log "Hatalara bağlı olarak Gensyn yeniden başlatılıyor..."
+# CPU izlemesini kontrol eden fonksiyon
+proc check_cpu_restart {} {
+    if {[file exists "/tmp/gensyn_restart_needed"]} {
+        log_msg "CPU izleme düşük CPU tespit etti. Gensyn yeniden başlatılıyor..."
+        exec rm -f "/tmp/gensyn_restart_needed"
+        restart_app
+    }
     
-    # Ctrl+C sinyallerini birkaç kez gönder
-    for i in {1..3}; do
-        kill -SIGINT $GENSYN_PID 2>/dev/null
-        sleep 2
-    done
-    
-    # İşlemin sonlandığından emin ol
-    kill $GENSYN_PID 2>/dev/null
-    
-    # Yeniden başlatmadan önce bekle
-    sleep 5
-    
-    # Çıktı dosyasını temizle
-    echo "" > $OUTPUT_FILE
-    
-    # İşlemi yeniden başlat
-    run_gensyn
-    log "Gensyn yeniden başlatıldı, PID: $GENSYN_PID"
+    # 30 saniye sonra tekrar kontrol et
+    after 30000 check_cpu_restart
 }
 
-# CPU kullanımını izle
-monitor_cpu() {
-    local low_cpu_count=0
-    local threshold=50
-    local check_interval=60  # Her dakika kontrol et
-    local max_low_cpu=60     # Bir saat (60 kontrol)
+# Ana uygulama başlangıcı
+log_msg "Gensyn Testnet otomatik yanıtlama ve izleme scripti başlatılıyor..."
+
+# CPU izlemeyi başlat
+start_cpu_monitor
+
+# Ana komutu çalıştır
+spawn bash -c "cd \$HOME && rm -rf gensyn-testnet && git clone https://github.com/zunxbt/gensyn-testnet.git && chmod +x gensyn-testnet/gensyn.sh && ./gensyn-testnet/gensyn.sh"
+
+# CPU yeniden başlatma kontrolünü başlat
+check_cpu_restart
+
+# Yanıtları verme ve izleme
+handle_prompts
+
+# Script aktif olarak çalışıyor mesajı
+log_msg "Script aktif olarak çalışıyor ve izliyor. Çıkmak için Ctrl+C..."
+
+# Sonsuz bekleme - script sessizce çalışmaya devam eder
+while {1} {
+    # CPU izlemeyi kontrol et
+    if {[file exists "/tmp/gensyn_restart_needed"]} {
+        log_msg "CPU izleme düşük CPU tespit etti. Gensyn yeniden başlatılıyor..."
+        exec rm -f "/tmp/gensyn_restart_needed"
+        restart_app
+    }
     
-    while true; do
-        # İşlemin CPU kullanımını al
-        if ! ps -p $GENSYN_PID > /dev/null; then
-            log "Gensyn işlemi artık çalışmıyor, CPU izleme durduruldu"
-            return
-        fi
-        
-        local cpu_usage=$(ps -p $GENSYN_PID -o %cpu= | awk '{print int($1)}')
-        
-        log "Mevcut CPU kullanımı: ${cpu_usage}%"
-        
-        if [ "$cpu_usage" -lt "$threshold" ]; then
-            low_cpu_count=$((low_cpu_count + 1))
-            log "Düşük CPU sayacı: $low_cpu_count/$max_low_cpu"
-            
-            if [ "$low_cpu_count" -ge "$max_low_cpu" ]; then
-                log "CPU kullanımı ${threshold}% altında 1 saat boyunca kaldı, yeniden başlatılıyor..."
-                restart_process
-                low_cpu_count=0
-            fi
-        else
-            low_cpu_count=0
-        fi
-        
-        sleep $check_interval
-    done
-}
-
-# Başarılı bağlantıyı izle
-monitor_success() {
-    while true; do
-        if [ ! -f "$OUTPUT_FILE" ]; then
-            sleep 30
-            continue
-        fi
-        
-        if grep -q "Connected to Gensyn Testnet" "$OUTPUT_FILE"; then
-            log "✅ Gensyn Testnet'e başarıyla bağlanıldı!"
-        fi
-        sleep 60
-    done
-}
-
-# Temizlik fonksiyonu
-cleanup() {
-    log "Temizlik yapılıyor ve çıkılıyor..."
-    kill $MONITOR_CPU_PID 2>/dev/null
-    kill $MONITOR_SUCCESS_PID 2>/dev/null
-    rm -f $PIPE
-    log "Temizlik tamamlandı. Log dosyası: $LOG_FILE"
-    exit 0
-}
-
-# Trap sinyalleri
-trap cleanup SIGINT SIGTERM
-
-# Ana çalıştırma
-log "Gensyn Testnet otomatik yanıt sistemi başlatılıyor..."
-log "Benzersiz ID: $UNIQUE_ID"
-
-# İlk işlemi başlat
-run_gensyn
-
-if [ -z "$GENSYN_PID" ]; then
-    log "Gensyn işlemi başlatılamadı. Lütfen hataları kontrol edin ve tekrar deneyin."
-    exit 1
-fi
-
-# CPU izlemeyi arka planda başlat
-monitor_cpu &
-MONITOR_CPU_PID=$!
-
-# Başarı izlemeyi başlat
-monitor_success &
-MONITOR_SUCCESS_PID=$!
-
-# Ana izleme döngüsü
-log "Ana izleme döngüsü başlatıldı"
-while true; do
-    # İşlem öldüyse yeniden başlat
-    if ! ps -p $GENSYN_PID > /dev/null; then
-        log "Gensyn işlemi kapandı, yeniden başlatılıyor..."
-        # Çıktı dosyasını temizle
-        echo "" > $OUTPUT_FILE
-        run_gensyn
-        log "Gensyn yeniden başlatıldı, PID: $GENSYN_PID"
-    fi
+    # Gensyn işleminin hala çalışıp çalışmadığını kontrol et
+    set gensyn_running [exec pgrep -f "gensyn-testnet/gensyn.sh" | wc -l]
+    if {$gensyn_running == 0} {
+        log_msg "Gensyn işlemi çalışmıyor. Yeniden başlatılıyor..."
+        restart_app
+    }
     
-    # Hatalar için logları kontrol et
-    if check_for_errors; then
-        restart_process
-    fi
-    
+    # Her 30 saniyede bir kontrol et
     sleep 30
-done
+}
